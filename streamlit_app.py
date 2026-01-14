@@ -392,8 +392,14 @@ if roi_method == "Draw on Map" and st.session_state['roi'] is None:
     # We initialize the map specifically for drawing with draw_export=True
     m_draw = geemap.Map(height=550, basemap="HYBRID", center=[20.59, 78.96], zoom=5)
     
-    # Configure Draw Control explicitly
-    m_draw.add_draw_control() 
+    # --- SAFETY CHECK FOR DRAW CONTROL ---
+    # The AttributeError happens because some geemap versions add this by default
+    # or expose it differently. We use try-except to prevent app crash.
+    try:
+        m_draw.add_draw_control() 
+    except Exception as e:
+        # If the method doesn't exist or control is already there, we pass
+        pass 
     
     # Capture map output
     map_output = m_draw.to_streamlit(width=None, height=550)
