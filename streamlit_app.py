@@ -23,7 +23,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 2. CSS STYLING (Adapted for Carbon/Nature Theme) ---
+# --- 2. CSS STYLING ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;600&display=swap');
@@ -117,16 +117,6 @@ st.markdown("""
         margin-bottom: 15px;
         margin-top: 15px;
     }
-    .date-badge {
-        background-color: #dcedc8;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: #1b5e20;
-        margin-top: 5px;
-        display: inline-block;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -181,9 +171,6 @@ def geojson_to_ee(geo_json):
         return None
 
 def detect_state_from_geometry(geometry):
-    """
-    Detects which Indian State the geometry center falls into using FAO GAUL.
-    """
     try:
         states = ee.FeatureCollection("FAO/GAUL/2015/level1")
         center = geometry.centroid(100)
@@ -271,8 +258,10 @@ def generate_static_map_display(image, roi, vis_params, title, cmap_colors=None,
 
 # --- 6. SIDEBAR ---
 with st.sidebar:
-    # Use raw=true for GitHub blob links
-    st.image("https://github.com/nitesh4004/geoCO/blob/63c8210e57ec3ee0f21ffb6de948ae979b4ccf18/logo.png?raw=true", use_container_width=True)
+    # --- LOGO SIZE FIX ---
+    # Added width=150 to reduce size
+    st.image("https://github.com/nitesh4004/geoCO/blob/63c8210e57ec3ee0f21ffb6de948ae979b4ccf18/logo.png?raw=true", width=150)
+    
     st.markdown("### 1. Select Module")
     app_mode = st.radio("Choose Functionality:",
                         ["🌿 Vegetation Health",
@@ -353,7 +342,7 @@ with st.sidebar:
         params = {
             'source': biomass_src,
             'price': carbon_price,
-            'year': 2020 # CCI Biomass latest stable
+            'year': 2020 
         }
 
     elif app_mode == "🌍 LULC & MRV":
@@ -397,14 +386,36 @@ def get_safe_map(height=500):
 
 # --- CASE 1: DRAW MODE ACTIVE, ROI NOT SET ---
 if roi_method == "Draw on Map" and st.session_state['roi'] is None:
-    st.info("🗺️ **Instructions:**\n1. Use the **Polygon** tool on the map sidebar.\n2. Draw your Area of Interest (AOI).\n3. Click **'✅ Set as ROI'** below.")
+    st.info("🗺️ **Instructions:**\n1. Select the **Polygon tool** (pentagon icon) on the map.\n2. Draw your area.\n3. Click **'✅ Set as ROI'** below.")
     
+    # --- DRAW MAP FIX ---
+    # We initialize the map specifically for drawing with draw_export=True
     m_draw = geemap.Map(height=550, basemap="HYBRID", center=[20.59, 78.96], zoom=5)
+    
+    # Configure Draw Control explicitly
+    m_draw.add_draw_control() 
+    
+    # Capture map output
     map_output = m_draw.to_streamlit(width=None, height=550)
 
     if st.button("✅ Set as ROI", type="primary"):
-        if map_output and isinstance(map_output, dict) and map_output.get('last_active_drawing'):
-            drawn_geom = map_output['last_active_drawing']['geometry']
+        # ROBUST DRAWING CHECK
+        drawing_found = False
+        drawn_geom = None
+
+        if map_output and isinstance(map_output, dict):
+            # Check for last_active_drawing (standard geemap return)
+            if map_output.get('last_active_drawing'):
+                drawn_geom = map_output['last_active_drawing']['geometry']
+                drawing_found = True
+            # Fallback: Check for all_drawings if last_active is missing
+            elif map_output.get('all_drawings'):
+                drawings = map_output['all_drawings']
+                if len(drawings) > 0:
+                    drawn_geom = drawings[-1]['geometry'] # Get the last one drawn
+                    drawing_found = True
+
+        if drawing_found and drawn_geom:
             ee_geom = geojson_to_ee(drawn_geom)
             
             if ee_geom:
@@ -419,7 +430,7 @@ if roi_method == "Draw on Map" and st.session_state['roi'] is None:
                 st.success("ROI Locked! Please click 'RUN ANALYSIS' in the sidebar.")
                 st.rerun()
         else:
-            st.warning("⚠️ No drawing detected! Please draw a polygon on the map first.")
+            st.warning("⚠️ No drawing detected! Please use the Polygon tool to draw a shape first.")
 
 # --- CASE 2: ROI IS SET BUT NOT CALCULATED YET ---
 elif not st.session_state['calculated']:
@@ -502,8 +513,6 @@ else:
                         
                         # Classification logic
                         if p['index'] == "NDVI":
-                            hist = computed_img.reduceRegion(ee.Reducer.fixedHistogram(0, 1, 10), roi, 50).getInfo()
-                            # Simply categorize based on mean for summary
                             status = "Healthy 🟢" if mean_val > 0.4 else "Moderate 🟡" if mean_val > 0.2 else "Poor 🔴"
                             st.metric("Veg. Condition", status)
                         
@@ -512,11 +521,6 @@ else:
                         # Time Series
                         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                         st.markdown('<div class="card-label">📈 TREND</div>', unsafe_allow_html=True)
-                        
-                        def get_ts(img):
-                            date = ee.Date(img.get('system:time_start')).format('YYYY-MM-dd')
-                            val = img.normalizedDifference(['B8', 'B4']).reduceRegion(ee.Reducer.mean(), roi, 100).get('nd')
-                            return ee.Feature(None, {'date': date, 'value': val})
                         
                         ts_fc = dataset.map(lambda img: ee.Feature(None, {
                             'date': ee.Date(img.get('system:time_start')).format('YYYY-MM-dd'),
@@ -551,25 +555,19 @@ else:
                     # Empirical Model (Simple Sentinel-2 Proxy)
                     s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(roi).filterDate('2023-01-01', '2023-06-01').median().clip(roi)
                     ndvi = s2.normalizedDifference(['B8', 'B4'])
-                    # Simple Allometric proxy: AGB = 100 * NDVI^2 (Just for demo purposes, replace with species specific eq)
                     agb_image = ndvi.pow(2).multiply(100).rename('agb')
 
                 # Carbon Calculation Logic
-                # 1. AGB (Tonnes/Ha) -> Carbon (Tonnes/Ha) [IPCC factor 0.47]
                 carbon_density = agb_image.multiply(0.47).rename('carbon_density')
-                
-                # 2. Carbon -> CO2e (Tonnes/Ha) [Ratio 44/12 = 3.67]
                 co2e_density = carbon_density.multiply(3.67).rename('co2e_density')
                 
-                # 3. Total Stock Calculation (Sum over area)
-                # Pixel Area (m2) / 10000 = Hectares
+                # Stats
                 stats_agb = agb_image.multiply(ee.Image.pixelArea().divide(10000))\
                             .reduceRegion(ee.Reducer.sum(), roi, scale=100, maxPixels=1e9).get('agb').getInfo()
                 
                 stats_co2 = co2e_density.multiply(ee.Image.pixelArea().divide(10000))\
                             .reduceRegion(ee.Reducer.sum(), roi, scale=100, maxPixels=1e9).get('co2e_density').getInfo()
 
-                # Visualization
                 vis_agb = {'min': 0, 'max': 300, 'palette': ['#ffffcc', '#c2e699', '#78c679', '#31a354', '#006837']}
                 m.addLayer(agb_image, vis_agb, 'AGB (Mg/ha)')
                 m.add_colorbar(vis_agb, label="Biomass (Mg/ha)")
@@ -583,14 +581,14 @@ else:
                     
                     total_agb = stats_agb if stats_agb else 0
                     total_co2 = stats_co2 if stats_co2 else 0
-                    potential_credits = total_co2 # 1 Ton CO2e = 1 Credit
+                    potential_credits = total_co2 
                     total_value = potential_credits * p['price']
                     
                     st.metric("Total Biomass (AGB)", f"{total_agb:,.1f} tons")
                     st.metric("Est. Carbon Credits", f"{potential_credits:,.1f}", delta="Credits")
                     st.metric("Potential Value", f"${total_value:,.2f}")
                     
-                    st.caption("Assumption: 1 Credit = 1 Ton CO2e. IPCC Tier 1.")
+                    st.caption("Assumption: 1 Credit = 1 Ton CO2e.")
                     st.markdown("</div>", unsafe_allow_html=True)
             
             except Exception as e:
@@ -606,7 +604,6 @@ else:
                      .filterDate(p['start'], p['end'])\
                      .filterBounds(roi)
                 
-                # Create a Mode Mosaic (Most frequent class per pixel)
                 classification = dw.select('label').reduce(ee.Reducer.mode()).clip(roi)
                 
                 dw_vis = {
@@ -616,8 +613,6 @@ else:
                 labels = ['Water', 'Trees', 'Grass', 'Flooded Veg', 'Crops', 'Shrub/Scrub', 'Built', 'Bare', 'Snow']
                 
                 m.addLayer(classification, dw_vis, 'Land Cover')
-                
-                # Legend (Custom html or geemap built-in)
                 m.add_legend(title="LULC Classes", labels=labels, colors=dw_vis['palette'])
                 
                 image_to_export = classification
@@ -627,7 +622,6 @@ else:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                     st.markdown(f'<div class="card-label">🏗️ LULC BREAKDOWN</div>', unsafe_allow_html=True)
                     
-                    # Calculate Area per class
                     area_image = ee.Image.pixelArea().divide(10000).addBands(classification)
                     class_areas = area_image.reduceRegion(
                         reducer=ee.Reducer.sum().group(groupField=1, groupName='class_index'),
@@ -646,7 +640,6 @@ else:
                         fig = px.pie(df_lulc, values='Hectares', names='Class', hole=0.4, color_discrete_sequence=px.colors.qualitative.Prism)
                         fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=200, paper_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig, use_container_width=True)
-                        
                         st.dataframe(df_lulc.set_index('Class').style.format("{:.2f}"))
                     
                     st.markdown("</div>", unsafe_allow_html=True)
